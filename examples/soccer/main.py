@@ -393,20 +393,16 @@ def run_possession_tracking(source_video_path: str, device: str) -> Iterator[np.
     and display live possession percentage stats. Yields annotated frames.
     """
     print("Initializing models and components for Possession Tracking...")
-    # --- Initialization (Combine from team_classification and ball_detection) ---
     player_detection_model = YOLO(PLAYER_DETECTION_MODEL_PATH).to(device=device)
-    ball_detection_model = YOLO(BALL_DETECTION_MODEL_PATH).to(device=device) # Load ball model
+    ball_detection_model = YOLO(BALL_DETECTION_MODEL_PATH).to(device=device) 
 
-    # Initialize Team Classifier and FIT IT FIRST (crucial!)
     print("Collecting initial crops for team classification...")
     team_classifier = TeamClassifier(device=device)
     initial_frame_generator = sv.get_video_frames_generator(
-        source_path=source_video_path, stride=STRIDE) # Use stride to speed up crop collection
+        source_path=source_video_path, stride=STRIDE) 
     initial_crops = []
-    # Limit the number of frames used for fitting for speed, e.g., first 50 strided frames
     frame_count_for_fitting = 0
     max_frames_for_fitting = 50
-    # Use try-except to handle potential StopIteration if video is shorter than max_frames_for_fitting * STRIDE
     try:
         with tqdm(initial_frame_generator, desc='Collecting crops for team fitting', total=max_frames_for_fitting) as pbar:
             for frame in pbar:
@@ -418,8 +414,6 @@ def run_possession_tracking(source_video_path: str, device: str) -> Iterator[np.
                 if len(player_detections) > 0:
                     initial_crops.extend(get_crops(frame, player_detections))
                 frame_count_for_fitting += 1
-                # Manually update tqdm if total is known and iterator might be shorter
-                # pbar.update(1) # Tqdm handles this automatically with iterable
     except StopIteration:
         print(f"\nReached end of video while collecting crops after {frame_count_for_fitting} frames.")
 
@@ -431,81 +425,68 @@ def run_possession_tracking(source_video_path: str, device: str) -> Iterator[np.
     print("Team classifier fitting complete.")
 
 
-    # Initialize Trackers
     player_tracker = sv.ByteTrack(minimum_consecutive_frames=3)
-    ball_tracker = BallTracker(buffer_size=20) # From run_ball_detection
+    ball_tracker = BallTracker(buffer_size=20) 
 
-    # Ball detection slicer (from run_ball_detection)
     def ball_callback(image_slice: np.ndarray) -> sv.Detections:
         result = ball_detection_model(image_slice, imgsz=640, verbose=False)[0]
         return sv.Detections.from_ultralytics(result)
     ball_slicer = sv.InferenceSlicer(callback=ball_callback, slice_wh=(640, 640))
 
-    # Annotators
     player_ellipse_annotator = sv.EllipseAnnotator(color=sv.ColorPalette.from_hex(COLORS), thickness=2)
     player_label_annotator = sv.LabelAnnotator(color=sv.ColorPalette.from_hex(COLORS), text_color=sv.Color.WHITE, text_padding=5, text_thickness=1, text_position=sv.Position.BOTTOM_CENTER)
-    ball_annotator = BallAnnotator(radius=10, thickness=2, buffer_size=10) # Customize ball annotation
-
-    # --- Possession Statistics Variables --- START ---
+    ball_annotator = BallAnnotator(radius=10, thickness=2, buffer_size=10) 
     total_processed_frames = 0
-    # Initialize counts for Team 0 and Team 1
     possession_counts = {0: 0, 1: 0}
-    # --- Possession Statistics Variables --- END ---
 
 
-    # --- Main Processing Loop ---
     print("Starting main frame processing loop...")
     frame_generator = sv.get_video_frames_generator(source_path=source_video_path)
 
-    for frame in frame_generator: # frame_idx is not needed if using enumerate
-        total_processed_frames += 1 # Increment total frame count
+    for frame in frame_generator: 
+        total_processed_frames += 1 
         annotated_frame = frame.copy()
 
-        # --- Player Detection, Tracking, Team Classification ---
         player_result = player_detection_model(frame, imgsz=1280, verbose=False)[0]
         all_detections = sv.Detections.from_ultralytics(player_result)
-        # Handle case where tracker might be empty initially or after losing tracks
         if len(all_detections) > 0:
             tracked_detections = player_tracker.update_with_detections(all_detections)
         else:
-            # Ensure tracker is updated even with no detections to maintain internal state
             tracked_detections = player_tracker.update_with_detections(all_detections)
 
 
-        # Filter detections by class
         players = tracked_detections[tracked_detections.class_id == PLAYER_CLASS_ID]
         goalkeepers = tracked_detections[tracked_detections.class_id == GOALKEEPER_CLASS_ID]
         referees = tracked_detections[tracked_detections.class_id == REFEREE_CLASS_ID]
 
-        players_team_id = np.array([], dtype=int) # Default empty
+        players_team_id = np.array([], dtype=int) 
         if len(players) > 0:
             player_crops = get_crops(frame, players)
-            if player_crops: # Ensure crops are not empty before predicting
+            if player_crops: 
                 players_team_id = team_classifier.predict(player_crops)
             else:
-                 players_team_id = np.array([], dtype=int) # Handle no crops case
+                 players_team_id = np.array([], dtype=int) 
 
 
-        goalkeepers_team_id = np.array([], dtype=int) # Default empty
-        if len(goalkeepers) > 0 and len(players) > 0 and len(players_team_id) == len(players): # Ensure player IDs are valid for resolving GK team
+        goalkeepers_team_id = np.array([], dtype=int) 
+        if len(goalkeepers) > 0 and len(players) > 0 and len(players_team_id) == len(players): 
              goalkeepers_team_id = resolve_goalkeepers_team_id(players, players_team_id, goalkeepers)
         elif len(goalkeepers) > 0:
-            goalkeepers_team_id = np.array([0] * len(goalkeepers)) # Simple fallback
+            goalkeepers_team_id = np.array([0] * len(goalkeepers)) 
 
 
-        # Combine detections and create color lookup for annotation
         valid_detections_list = []
         team_ids_list = []
 
-        if len(players) == len(players_team_id): # Check consistency before adding
+        if len(players) == len(players_team_id):
             valid_detections_list.append(players)
             team_ids_list.extend(players_team_id.tolist())
-        if len(goalkeepers) == len(goalkeepers_team_id): # Check consistency
+        if len(goalkeepers) == len(goalkeepers_team_id): 
             valid_detections_list.append(goalkeepers)
             team_ids_list.extend(goalkeepers_team_id.tolist())
         if len(referees) > 0:
             valid_detections_list.append(referees)
-            team_ids_list.extend([REFEREE_CLASS_ID] * len(referees)) # Use referee class ID
+            team_ids_list.extend([REFEREE_CLASS_ID] * len(referees))
 
         if not valid_detections_list:
             final_tracked_detections = sv.Detections.empty()
@@ -514,23 +495,19 @@ def run_possession_tracking(source_video_path: str, device: str) -> Iterator[np.
         else:
             final_tracked_detections = sv.Detections.merge(valid_detections_list)
             color_lookup = np.array(team_ids_list)
-            # Ensure tracker_id is present and matches length
             if hasattr(final_tracked_detections, 'tracker_id') and len(color_lookup) == len(final_tracked_detections.tracker_id):
-                 player_labels = [f"T{tid if tid < 2 else 'R'} #{det_id}" # Label with Team (0/1) or R and track ID
+                 player_labels = [f"T{tid if tid < 2 else 'R'} #{det_id}" 
                                   for tid, det_id in zip(color_lookup, final_tracked_detections.tracker_id)]
             else:
-                 # Fallback if tracker_id is missing or length mismatch
                  player_labels = [f"T{tid if tid < 2 else 'R'}" for tid in color_lookup]
 
 
-        # --- Ball Detection and Tracking ---
         ball_detections = ball_slicer(frame).with_nms(threshold=0.1)
-        tracked_ball_detections = ball_tracker.update(ball_detections) # Use ball_tracker instance
+        tracked_ball_detections = ball_tracker.update(ball_detections)
 
 
-        # --- Possession Logic ---
         player_in_possession_track_id = None
-        team_in_possession_id = None # Reset each frame before calculation
+        team_in_possession_id = None 
         min_dist_to_ball = float('inf')
 
         if len(tracked_ball_detections) > 0 and len(final_tracked_detections) > 0 and hasattr(final_tracked_detections, 'tracker_id'):
@@ -541,57 +518,45 @@ def run_possession_tracking(source_video_path: str, device: str) -> Iterator[np.
 
             player_anchors = final_tracked_detections.get_anchors_coordinates(anchor=sv.Position.BOTTOM_CENTER)
 
-            # Ensure color_lookup matches the number of detections being considered
             if len(color_lookup) == len(final_tracked_detections):
-                relevant_indices = np.where(color_lookup != REFEREE_CLASS_ID)[0] # Indices of players/GKs
+                relevant_indices = np.where(color_lookup != REFEREE_CLASS_ID)[0] 
                 if len(relevant_indices) > 0:
-                    # Ensure player_anchors slice matches relevant_indices length
                     if len(player_anchors) == len(final_tracked_detections):
                         distances = np.linalg.norm(player_anchors[relevant_indices] - ball_pos, axis=1)
                         closest_player_local_idx = np.argmin(distances)
                         min_dist_to_ball = distances[closest_player_local_idx]
                         closest_player_global_idx = relevant_indices[closest_player_local_idx]
 
-                        max_possession_distance = 150 # Example: pixels - ADJUST AS NEEDED
+                        max_possession_distance = 150
 
                         if min_dist_to_ball < max_possession_distance:
-                            # Check if tracker_id exists and index is valid
                             if len(final_tracked_detections.tracker_id) > closest_player_global_idx:
                                 player_in_possession_track_id = final_tracked_detections.tracker_id[closest_player_global_idx]
                                 team_in_possession_id = color_lookup[closest_player_global_idx]
 
-                                # --- Increment Possession Counter --- START ---
                                 if team_in_possession_id in possession_counts:
                                     possession_counts[team_in_possession_id] += 1
-                                # --- Increment Possession Counter --- END ---
                     else:
                         print(f"Warning: Mismatch between player_anchors ({len(player_anchors)}) and final_detections ({len(final_tracked_detections)}) length.")
             else:
                 print(f"Warning: Mismatch between color_lookup ({len(color_lookup)}) and final_detections ({len(final_tracked_detections)}) length.")
 
 
-        # --- Annotation ---
-        # Annotate players/GKs/Referees
         if len(final_tracked_detections) > 0 and len(color_lookup) == len(final_tracked_detections):
             annotated_frame = player_ellipse_annotator.annotate(
                 annotated_frame, final_tracked_detections, custom_color_lookup=color_lookup)
-            # Ensure labels match detections before annotating
             if len(player_labels) == len(final_tracked_detections):
                  annotated_frame = player_label_annotator.annotate(
                     annotated_frame, final_tracked_detections, labels=player_labels, custom_color_lookup=color_lookup)
 
 
-        # Annotate ball
         annotated_frame = ball_annotator.annotate(annotated_frame, tracked_ball_detections)
 
-        # --- Annotate Possession Info & Statistics --- START ---
         possession_text = "Possession: None"
         if team_in_possession_id is not None:
             possession_text = f"Possession: Team {team_in_possession_id} (Player #{player_in_possession_track_id})"
 
-        # Draw possession text
         frame_h, frame_w, _ = annotated_frame.shape
-        # Slightly smaller font for stats maybe
         font_scale = 0.8
         font_thickness = 2
         text_y_start = 50
@@ -599,21 +564,19 @@ def run_possession_tracking(source_video_path: str, device: str) -> Iterator[np.
         cv2.putText(annotated_frame, possession_text, (50, text_y_start),
                     cv2.FONT_HERSHEY_SIMPLEX, font_scale, (255, 255, 255), font_thickness, cv2.LINE_AA)
 
-        # Calculate and draw possession percentages
         percentage_team_0 = (possession_counts[0] / total_processed_frames) * 100 if total_processed_frames > 0 else 0
         percentage_team_1 = (possession_counts[1] / total_processed_frames) * 100 if total_processed_frames > 0 else 0
 
         stats_text_0 = f"Team 0 Possession: {percentage_team_0:.1f}%"
         stats_text_1 = f"Team 1 Possession: {percentage_team_1:.1f}%"
 
-        cv2.putText(annotated_frame, stats_text_0, (50, text_y_start + 40), # Position below
+        cv2.putText(annotated_frame, stats_text_0, (50, text_y_start + 40), 
                     cv2.FONT_HERSHEY_SIMPLEX, font_scale, sv.Color.from_hex(COLORS[0]).as_bgr(), font_thickness, cv2.LINE_AA)
-        cv2.putText(annotated_frame, stats_text_1, (50, text_y_start + 80), # Position below team 0
+        cv2.putText(annotated_frame, stats_text_1, (50, text_y_start + 80), 
                     cv2.FONT_HERSHEY_SIMPLEX, font_scale, sv.Color.from_hex(COLORS[1]).as_bgr(), font_thickness, cv2.LINE_AA)
-        # --- Annotate Possession Info & Statistics --- END ---
 
 
-        yield annotated_frame # Yield the final annotated frame
+        yield annotated_frame
 
 
 def main(source_video_path: str, target_video_path: str, device: str, mode: Mode) -> None:
